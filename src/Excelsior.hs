@@ -3,38 +3,42 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FunctionalDependencies #-}
 module Excelsior 
-  ( SomeAction(..), Action(..)
+  ( SomeCommand(..), Command(..)
   , Reducer, Middleware
   , createStore
   , reducer, applyReducers
   , middleware, applyMiddlewares
-  , dispatch
+  , command, commands
   , watch, excel
   ) where
 
 import Ef.Event
-import Pure.View hiding (Action)
-import Pure.Service hiding (Action)
+import Pure.View hiding (Command)
+import Pure.Service hiding (Command)
 import Data.Typeable
 import Pure.WebSocket.TypeRep (rep)
 
-data SomeAction state = forall e. Action state e => SomeAction e
+data SomeCommand state = forall e. Command state e => SomeCommand e
 
-class Typeable e => Action (state :: *) (e :: *) | e -> state where
-    toAction :: e -> SomeAction state
-    fromAction :: SomeAction state -> Maybe e
+class Typeable c => Command (state :: *) (c :: *) | c -> state where
+    toCommand :: c -> SomeCommand state
+    fromCommand :: SomeCommand state -> Maybe c
 
-    toAction = SomeAction
-    fromAction (SomeAction e) = cast e
+    {-# INLINE toCommand #-}
+    toCommand = SomeCommand
+    {-# INLINE fromCommand #-}
+    fromCommand (SomeCommand c) = cast c
 
-instance Typeable state => Action state (SomeAction state) where
-    toAction = id
-    fromAction = Just
+instance Typeable state => Command state (SomeCommand state) where
+    {-# INLINE toCommand #-}
+    toCommand = id
+    {-# INLINE fromCommand #-}
+    fromCommand = Just
 
-type Reducer state = SomeAction state -> state -> state
-type Middleware state = state -> (SomeAction state -> IO state) -> SomeAction state -> IO state
+type Reducer state = SomeCommand state -> state -> state
+type Middleware state = state -> (SomeCommand state -> IO state) -> SomeCommand state -> IO state
 
-type Handler state = SomeAction state -> state -> IO state
+type Handler state = SomeCommand state -> state -> IO state
 
 data ExcelsiorState state = ExcelsiorState
   { esCurrentReducers :: [Reducer state]
@@ -44,6 +48,7 @@ data ExcelsiorState state = ExcelsiorState
 
 type Excelsior state = Service '[State () (ExcelsiorState state),Observable state]
 
+{-# INLINE store #-}
 store :: forall state. Typeable state 
           => state -> [Reducer state] -> [Middleware state] -> Excelsior state
 store initial reducers middlewares = Service {..}
@@ -55,20 +60,22 @@ store initial reducers middlewares = Service {..}
         return (state is *:* obs *:* base)
     prime = return ()
 
-composeHandler :: forall state . [Middleware state] -> [Reducer state] -> SomeAction state -> state -> IO state
-composeHandler middlewares reducers action state = handleMiddlewares action middlewares
+{-# INLINE composeHandler #-}
+composeHandler :: forall state. [Middleware state] -> [Reducer state] -> SomeCommand state -> state -> IO state
+composeHandler middlewares reducers command state = handleMiddlewares command middlewares
     where
-        handleMiddlewares action [] = return (reduce action state reducers)
-        handleMiddlewares action (m:ms) = m state (\action -> handleMiddlewares action ms) action
+        handleMiddlewares command [] = return (reduce command state reducers)
+        handleMiddlewares command (m:ms) = m state (\command -> handleMiddlewares command ms) command
 
         reduce _ state [] = state
-        reduce action state (r:rs) = reduce action (r action state) rs
+        reduce command state (r:rs) = reduce command (r command state) rs
 
 createStore :: (MonadIO c, Typeable state) => state -> [Reducer state] -> [Middleware state] -> c ()
 createStore state reducers middlewares = void $ with (store state reducers middlewares) (return ())
 
-reducer :: (Action state a) => (a -> state -> state) -> Reducer state
-reducer f (fromAction -> Just a) state = f a state
+{-# INLINE reducer #-}
+reducer :: (Command state cmd) => (state -> cmd -> state) -> Reducer state
+reducer f (fromCommand -> Just a) state = f state a
 reducer _ _ state = state
 
 applyReducers :: forall c state. (MonadIO c, Typeable state) => [Reducer state] -> c (Promise ())
@@ -77,9 +84,10 @@ applyReducers reducers = with (store (undefined :: state) [] []) $ do
     let handler = composeHandler esCurrentMiddlewares reducers
     put ExcelsiorState { esCurrentReducers = reducers, esCurrentHandler = handler, .. }
 
-middleware :: (Action state a) => (state -> (SomeAction state -> IO state) -> a -> IO state) -> Middleware state
-middleware f state next (fromAction -> Just a) = f state next a
-middleware _ _ next action = next action
+{-# INLINE middleware #-}
+middleware :: (Command state cmd) => (state -> (SomeCommand state -> IO state) -> cmd -> IO state) -> Middleware state
+middleware f state next (fromCommand -> Just a) = f state next a
+middleware _ _ next command = next command
 
 applyMiddlewares :: forall c state. (MonadIO c, Typeable state) => [Middleware state] -> c (Promise ())
 applyMiddlewares middlewares = with (store (undefined :: state) [] []) $ do
@@ -87,16 +95,27 @@ applyMiddlewares middlewares = with (store (undefined :: state) [] []) $ do
     let handler = composeHandler middlewares esCurrentReducers
     put ExcelsiorState { esCurrentMiddlewares = middlewares, esCurrentHandler = handler, .. }
 
-dispatch :: forall c state a. (Typeable state, MonadIO c, Action state a) => a -> c (Promise ())
-dispatch (toAction -> sa) = with (store (undefined :: state) [] []) $ do 
+{-# INLINE command #-}
+command :: forall c state cmd. (Typeable state, MonadIO c, Command state cmd) => cmd -> c ()
+command (toCommand -> sc) = void $ with (store (undefined :: state) [] []) $ do
     state <- getO
     ExcelsiorState {..} <- get
-    state' <- liftIO (esCurrentHandler sa state)
+    state' <- liftIO $ esCurrentHandler sc state
     setO state'
 
+{-# INLINE commands #-}
+commands :: forall c state. (Typeable state, MonadIO c) => [SomeCommand state] -> c ()
+commands commands = void $ with (store (undefined :: state) [] []) $ do
+    state <- getO
+    ExcelsiorState {..} <- get
+    state' <- liftIO $ foldM (flip esCurrentHandler) state commands 
+    setO state'
+
+{-# INLINE watch #-}
 watch :: forall c ms state. (Typeable state, MonadIO c, ms <: '[Evented]) 
       => (state -> Ef '[Event state] (Ef ms c) ()) -> Ef ms c (Promise (IO ()))
 watch = observe (store (undefined :: state) [] [])
 
+{-# INLINE excel #-}
 excel :: (MVC model ms, Typeable state) => (state -> model ms -> model ms) -> Ef ms IO ()
 excel f = void $ watch $ lift . modifyModel . f 
