@@ -17,7 +17,7 @@ data Store = Store
   { value :: Int
   }
 
-data Arith = Add Int | Sub Int
+data Arith = Add Int | Sub Int deriving Show
 instance Store `Command` Arith
 
 reduceArith = reducer $ \state cmd -> 
@@ -25,13 +25,17 @@ reduceArith = reducer $ \state cmd ->
     Add n -> state { value = value state + n }
     Sub n -> state { value = value state - n }
 
+loggingMiddleware = middleware $ \_ next cmd -> do
+  print (cmd :: Arith)
+  next cmd
+
 data Routes = HomeR deriving Eq
 
 main = run App {..}
   where
     key = "my-app"
     build = return
-    prime = createStore (Store 0) [reduceArith] []
+    prime = createStore (Store 0) [reduceArith] [loggingMiddleware]
     root = Nothing
     routes = Pure.App.dispatch HomeR
     pages HomeR = pure $ page _Head _Home

@@ -85,8 +85,8 @@ applyReducers reducers = with (store (undefined :: state) [] []) $ do
     put ExcelsiorState { esCurrentReducers = reducers, esCurrentHandler = handler, .. }
 
 {-# INLINE middleware #-}
-middleware :: (Command state cmd) => (state -> (SomeCommand state -> IO state) -> cmd -> IO state) -> Middleware state
-middleware f state next (fromCommand -> Just a) = f state next a
+middleware :: (Command state cmd) => (state -> (forall cmd. Command state cmd => cmd -> IO state) -> cmd -> IO state) -> Middleware state
+middleware f state next (fromCommand -> Just a) = f state (next . toCommand) a
 middleware _ _ next command = next command
 
 applyMiddlewares :: forall c state. (MonadIO c, Typeable state) => [Middleware state] -> c (Promise ())
