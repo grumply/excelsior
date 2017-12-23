@@ -51,9 +51,9 @@ Of import are:
 * the `Command` instance for `Arith`
 * the `Reducer`, `reduceArith`
 * the `Middleware`, `loggingMiddleware`
-* the store creation during the priming of the `App` with the reducer and middleware
-* the `excel` command to inject changes from the store into `_SomeController`
-* the use of `command` in the counter `view` construction
+* the `createStore` during the priming of `App` with `reduceArith` and `loggingMiddleware`
+* the `excel` command to inject changes from the store into the `_Counter` controller
+* the use of `command` in `_Counter.view`
 
 ## Motivation
 
