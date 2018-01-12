@@ -9,7 +9,9 @@ module Excelsior
   , reducer, applyReducers
   , middleware, applyMiddlewares
   , command, commands
-  , watch, excel
+  , getStore
+  , watch, watch'
+  , excel, excel'
   ) where
 
 import Ef.Event
@@ -79,7 +81,7 @@ reducer f (fromCommand -> Just a) state = f state a
 reducer _ _ state = state
 
 applyReducers :: forall c state. (MonadIO c, Typeable state) => [Reducer state] -> c (Promise ())
-applyReducers reducers = with (store (undefined :: state) [] []) $ do
+applyReducers reducers = with (store (error "applyReducers: store not initialized" :: state) [] []) $ do
     ExcelsiorState {..} <- get
     let handler = composeHandler esCurrentMiddlewares reducers
     put ExcelsiorState { esCurrentReducers = reducers, esCurrentHandler = handler, .. }
@@ -90,14 +92,14 @@ middleware f state next (fromCommand -> Just a) = f state (next . toCommand) a
 middleware _ _ next command = next command
 
 applyMiddlewares :: forall c state. (MonadIO c, Typeable state) => [Middleware state] -> c (Promise ())
-applyMiddlewares middlewares = with (store (undefined :: state) [] []) $ do
+applyMiddlewares middlewares = with (store (error "applyMiddlewares: store not initialized" :: state) [] []) $ do
     ExcelsiorState {..} <- get
     let handler = composeHandler middlewares esCurrentReducers
     put ExcelsiorState { esCurrentMiddlewares = middlewares, esCurrentHandler = handler, .. }
 
 {-# INLINE command #-}
 command :: forall c state cmd. (Typeable state, MonadIO c, Command state cmd) => cmd -> c ()
-command (toCommand -> sc) = void $ with (store (undefined :: state) [] []) $ do
+command (toCommand -> sc) = void $ with (store (error "command: store not initialized" :: state) [] []) $ do
     state <- getO
     ExcelsiorState {..} <- get
     state' <- liftIO $ esCurrentHandler sc state
@@ -105,17 +107,30 @@ command (toCommand -> sc) = void $ with (store (undefined :: state) [] []) $ do
 
 {-# INLINE commands #-}
 commands :: forall c state. (Typeable state, MonadIO c) => [SomeCommand state] -> c ()
-commands commands = void $ with (store (undefined :: state) [] []) $ do
+commands commands = void $ with (store (error "commands: store not initialized" :: state) [] []) $ do
     state <- getO
     ExcelsiorState {..} <- get
     state' <- liftIO $ foldM (flip esCurrentHandler) state commands 
     setO state'
 
+{-# INLINE getStore #-}
+getStore :: forall c state. (Typeable state, MonadIO c) => c (Promise state)
+getStore = with (store (error "getStore: store not initialized" :: state) [] []) getO
+
 {-# INLINE watch #-}
 watch :: forall c ms state. (Typeable state, MonadIO c, ms <: '[Evented]) 
       => (state -> Ef '[Event state] (Ef ms c) ()) -> Ef ms c (Promise (IO ()))
-watch = observe (store (undefined :: state) [] [])
+watch = observe (store (error "watch: store not initialized" :: state) [] [])
+
+{-# INLINE watch' #-}
+watch' :: forall c ms state. (Typeable state, MonadIO c, ms <: '[Evented]) 
+       => (state -> Ef ms c ()) -> Ef ms c (Promise (IO ()))
+watch' = observe' (store (error "watch': store not initialized" :: state) [] [])
 
 {-# INLINE excel #-}
 excel :: (MVC model ms, Typeable state) => (state -> model ms -> model ms) -> Ef ms IO ()
 excel f = void $ watch $ lift . modifyModel . f 
+
+{-# INLINE excel' #-}
+excel' :: (MVC model ms, Typeable state) => (state -> model ms -> model ms) -> Ef ms IO ()
+excel' f = void $ watch' $ modifyModel . f
