@@ -5,11 +5,12 @@
 module Excelsior 
   ( SomeCommand(..), Command(..)
   , Reducer, Middleware
-  , createStore
+  , store, createStore
   , reducer, applyReducers
   , middleware, applyMiddlewares
   , command, commands
   , getStore
+  , watchIO, watchIO'
   , watch, watch'
   , excel, excel'
   ) where
@@ -46,18 +47,19 @@ data ExcelsiorState state = ExcelsiorState
   { esCurrentReducers :: [Reducer state]
   , esCurrentMiddlewares :: [Middleware state] 
   , esCurrentHandler :: Handler state
+  , esIOCallbacks :: [(Int,state -> IO ())]
   }
 
 type Excelsior state = Service '[State () (ExcelsiorState state),Observable state]
 
 {-# INLINE store #-}
 store :: forall state. Typeable state 
-          => state -> [Reducer state] -> [Middleware state] -> Excelsior state
+      => state -> [Reducer state] -> [Middleware state] -> Excelsior state
 store initial reducers middlewares = Service {..}
   where
     key = "excelsior_store_" <> fromTxt (rep (Proxy :: Proxy state))
     build base = do
-        let is = ExcelsiorState reducers middlewares (composeHandler middlewares reducers)
+        let is = ExcelsiorState reducers middlewares (composeHandler middlewares reducers) []
         obs <- observable initial
         return (state is *:* obs *:* base)
     prime = return ()
@@ -103,7 +105,12 @@ command (toCommand -> sc) = void $ with (store (error "command: store not initia
     state <- getO
     ExcelsiorState {..} <- get
     state' <- liftIO $ esCurrentHandler sc state
+
+    -- phase 1: notify observers
     setO state'
+
+    -- phase 2: call IO callbacks
+    liftIO $ mapM_ (($ state') . snd) esIOCallbacks
 
 {-# INLINE commands #-}
 commands :: forall c state. (Typeable state, MonadIO c) => [SomeCommand state] -> c ()
@@ -111,11 +118,52 @@ commands commands = void $ with (store (error "commands: store not initialized" 
     state <- getO
     ExcelsiorState {..} <- get
     state' <- liftIO $ foldM (flip esCurrentHandler) state commands 
+
+    -- phase 1: notify observers
     setO state'
+
+    -- phase 2: call IO callbacks
+    liftIO $ mapM_ (($ state') . snd) esIOCallbacks
 
 {-# INLINE getStore #-}
 getStore :: forall c state. (Typeable state, MonadIO c) => c (Promise state)
 getStore = with (store (error "getStore: store not initialized" :: state) [] []) getO
+
+{-# INLINE watchIO_ #-}
+watchIO_ :: forall c state. (Typeable state, MonadIO c)
+         => Bool -> (state -> IO ()) -> c (Promise (IO ()))
+watchIO_ immediate f = with (store (error "watchIO: store not initialized" :: state) [] []) $ do
+    u <- fresh
+    ExcelsiorState {..} <- get
+
+    -- this is an anti-pattern but we need to be able to remove the callback, 
+    -- so we can't store a continuation (state -> IO ()). We also don't want to
+    -- have to call reverse on the callbacks every time we send a command. This
+    -- shouldn't be a performance issue, especially compared to observe overhead.
+    let ioCallbacks = esIOCallbacks ++ [(u,f)]
+
+    put ExcelsiorState { esIOCallbacks = ioCallbacks, .. }
+
+    when immediate $ do
+      state <- getO
+      liftIO (f state)
+
+    let remove = void $ with (store (error "watchIO.remove: store has been terminated" :: state) [] []) $ do
+                   ExcelsiorState {..} :: ExcelsiorState state <- get
+                   let ioCallbacks = filter ((/=) u . fst) esIOCallbacks
+                   put ExcelsiorState { esIOCallbacks = ioCallbacks, .. }
+
+    return remove
+
+{-# INLINE watchIO #-}
+watchIO :: forall c state. (Typeable state, MonadIO c)
+        => (state -> IO ()) -> c (Promise (IO ()))
+watchIO = watchIO_ False
+
+{-# INLINE watchIO' #-}
+watchIO' :: forall c state. (Typeable state, MonadIO c)
+         => (state -> IO ()) -> c (Promise (IO ()))
+watchIO' = watchIO_ True
 
 {-# INLINE watch #-}
 watch :: forall c ms state. (Typeable state, MonadIO c, ms <: '[Evented]) 
