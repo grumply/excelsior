@@ -2,7 +2,7 @@
 
 This document is a work in progress.
 
-Excelsior is a new global state management library in the style of [Redux](https://redux.js.org) for Pure.  With Pure and Ef's core asynchronous types, Excelsior is implemented as a simple wrapper in approximately 100 lines of code. You can check out the full implementation [here](https://github.com/grumply/excelsior/blob/master/src/Excelsior.hs).
+Excelsior is a new global state management library in the style of [Redux](https://redux.js.org) for Pure.  With Pure and Ef's core asynchronous types, Excelsior is implemented as a simple wrapper in approximately 200 lines of code. You can check out the full implementation [here](https://github.com/grumply/excelsior/blob/master/src/Excelsior.hs).
 
 ## An Example
 
