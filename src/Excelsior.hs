@@ -132,7 +132,7 @@ getStore = with (store (error "getStore: store not initialized" :: state) [] [])
 {-# INLINE watchIO_ #-}
 watchIO_ :: forall c state. (Typeable state, MonadIO c)
          => Bool -> (state -> IO ()) -> c (Promise (IO ()))
-watchIO_ immediate f = with (store (error "watchIO: store not initialized" :: state) [] []) $ do
+watchIO_ immediate f = with (store (error "watchIO_: store not initialized" :: state) [] []) $ do
     u <- fresh
     ExcelsiorState {..} <- get
 
