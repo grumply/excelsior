@@ -55,28 +55,4 @@ Of import are:
 * the `excel` command to inject changes from the store into the `_Counter` controller
 * the `command` calls in `_Counter.view` click handlers
 
-## Motivation
 
-Excelsior, and, more generally, Redux-style libraries are, in effect, glorified global state.  But global state has been widely condemned for decades, cf. [c2/GlobalVariablesAreBad](wiki.c2.com/?GlobalVariablesAreBad).  So what makes it okay to use in a Pure application?  Let's lay out the problems with global state management, contrast that with local state management, and see what Excelsior does to ameliorate the issues and find a clean balance between the two.
-
-### Locality vs. Non-Locality
-
--- TODO: More...
-
-Context is always important when reading code, especially UI-centric code.  
-
-<example>
-
-### Access Control and Coupling
-
--- TODO: More...
-
-State access across boundaries, especially module boundary, is a critical metric for determining software complexity.  The more disparate the use of state modification, the more difficult it will be to debug issues dealing with flow of control.  Thus arose the [Law of Demeter/principle of least knowledge](wiki.c2.com/?LawOfDemeter); that access limitation via localization of context is critical for creating maintainable and adaptable software.
-
-<example>
-
-### Locking and Blocking
-
-As an extension of access control, the issues imposed by desynchronization of global state can lead to unpredicatable, often difficult to debug, scenarios, including locking in the case of synchronized mutable variables. 
-
-While Excelsior does not prevent you from creating desynchronization issues, following the generally applicable guidelines for Excelsior development can.  Specifically, it is best not to use mutable variables in a `store`.  Instead, rely on the command queue behind the store to control state access; only allow reducers to modify a store's content by always using `command` for store updates.
