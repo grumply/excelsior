@@ -1,49 +1,55 @@
-{-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE ExistentialQuantification, RankNTypes, ScopedTypeVariables, FunctionalDependencies, ViewPatterns, RecordWildCards, FlexibleInstances #-}
 module Excelsior
-  ( SomeCommand(..), SomeReducer, SomeMiddleware
-  , Command(..), Reducer, Middleware(..)
-  , store, createStore
-  , reducer, applyReducers
-  , middleware, applyMiddlewares
-  , command, commands
-  , getStore
-  , watchIO, watchIO'
-  , watch, watch'
-  , excel, excel'
+  ( SomeCommand, Command(..), Reducer, Middleware, Callback, Excelsior(..)
+  , reducer, middleware, command, watch, unwatch
   ) where
 
-import Ef.Event
-import Pure.View hiding (Command)
-import Pure.Service hiding (Command)
+-- from pure-core
+import Pure.Data.View
+import Pure.Data.View.Patterns
+
+-- from pure-default
+import Pure.Data.Default
+
+-- from base
+import Control.Concurrent
+import Control.Exception (try,SomeException)
+import Data.Foldable (traverse_)
+import Data.IORef
+import Data.Maybe
+import Data.Traversable (for,traverse)
 import Data.Typeable
-import Pure.WebSocket.TypeRep (rep)
+import GHC.Exts
+import System.IO.Unsafe
+import Unsafe.Coerce
 
-import Pure.Txt (Txt,ToTxt(..),FromTxt(..))
+-- from unordered-containers
+import qualified Data.HashMap.Strict as HashMap
 
-{-
+type Vault = IORef (HashMap.HashMap String Any)
 
-Rank2 NOTE:
+{-# NOINLINE vault #-}
+vault :: Vault
+vault = unsafePerformIO (newIORef HashMap.empty)
 
-If you run across a case where a Middleware's continuation does not resolve, either:
+addStore :: forall state. Typeable state => ExcelsiorState state -> IO ()
+addStore e = atomicModifyIORef' vault $ \v -> (HashMap.insert (show (typeOf (undefined :: state))) (unsafeCoerce e) v,())
 
-1. (preferred) Add a type signature to your middleware (not sure why this works):
+removeStore :: forall state. Typeable state => ExcelsiorState state -> IO ()
+removeStore e = atomicModifyIORef' vault $ \v -> (HashMap.delete (show (typeOf (undefined :: state))) v,())
 
-> go :: Middleware SomeStore SomeStoreCommand
-
-2. (should induce ghc warning if fully pattern matching) Add a case to your middleware that calls the continuation:
-
-> go k cmd _ = k cmd
-
-Even if unreachable, this will allow the middleware to type-check.
-
--}
+lookupStore :: forall state. Typeable state => IO (Maybe (ExcelsiorState state))
+lookupStore = do
+  v <- readIORef vault
+  return $ fmap unsafeCoerce $ HashMap.lookup (show (typeOf (undefined :: state))) v
 
 data SomeCommand state = forall e. Command state e => SomeCommand e
 
-class Typeable c => Command (state :: *) (c :: *) | c -> state where
+data Callback state = Callback
+  { ecCallback :: IORef (state -> IO ())
+  } deriving Eq
+
+class Typeable c => Command state c | c -> state where
     toCommand :: c -> SomeCommand state
     fromCommand :: SomeCommand state -> Maybe c
 
@@ -60,104 +66,66 @@ instance Typeable state => Command state (SomeCommand state) where
 
 type Reducer state command = command -> state -> state
 
--- See Rank2 NOTE
 type Middleware state command = (forall cmd. Command state cmd => cmd -> IO state) -> command -> state -> IO state
-
 type SomeReducer state = Reducer state (SomeCommand state)
 type SomeMiddleware state = (SomeCommand state -> IO state) -> SomeCommand state -> state -> IO state
 
 type Handler state = SomeCommand state -> state -> IO state
 
-data ExcelsiorState state = ExcelsiorState
-  { esCurrentReducers :: [SomeReducer state]
-  , esCurrentMiddlewares :: [SomeMiddleware state]
-  , esCurrentHandler :: Handler state
-  , esIOCallbacks :: [(Int,state -> IO ())]
+data ExcelsiorState_ state = ExcelsiorState
+  { esState     :: state
+  , esHandler   :: Handler state
+  , esCallbacks :: [IORef (state -> IO ())]
   }
 
-type Excelsior state = Service '[State () (ExcelsiorState state),Observable state]
+type ExcelsiorState state = MVar (ExcelsiorState_ state)
 
-{-# INLINE store #-}
--- See Rank2 NOTE
-store :: forall state. Typeable state
-      => state -> [SomeReducer state] -> [SomeMiddleware state] -> Excelsior state
-store initial reducers middlewares = Service {..}
-  where
-    key = "excelsior_store_" <> fromTxt (rep (Proxy :: Proxy state))
-    build base = do
-        let is = ExcelsiorState reducers middlewares (composeHandler middlewares reducers) []
-        obs <- observable initial
-        return (state is *:* obs *:* base)
-    prime = return ()
+data Excelsior state = Excelsior
+  { initial     :: state
+  , reducers    :: [SomeReducer state]
+  , middlewares :: [SomeMiddleware state]
+  }
 
-{-# INLINE composeHandler #-}
-composeHandler :: forall state. [SomeMiddleware state] -> [SomeReducer state] -> SomeCommand state -> state -> IO state
-composeHandler middlewares reducers command state = handleMiddlewares command middlewares
+instance Typeable state => Pure (Excelsior state) where
+  view =
+    ComponentIO $ \self -> def
+      { construct = do
+          Excelsior {..} <- getProps self
+          newMVar ExcelsiorState
+            { esState = initial
+            , esHandler = composeHandler middlewares reducers
+            , esCallbacks = []
+            }
+      , mount = \store -> addStore store >> return store
+      , receive = \newprops oldstate -> do
+          modifyMVar_ oldstate $ \es -> return es
+            { esState = initial newprops
+            , esHandler = composeHandler (middlewares newprops) (reducers newprops)
+            }
+          callCallbacks oldstate
+          return oldstate
+      , unmount = getState self >>= removeStore
+      }
     where
-        handleMiddlewares :: SomeCommand state -> [SomeMiddleware state] -> IO state
-        handleMiddlewares command (m:ms) = m (flip handleMiddlewares ms) command state
-        handleMiddlewares command []     = return (reduce command state reducers)
+      composeHandler :: forall state. [SomeMiddleware state] -> [SomeReducer state] -> Handler state
+      composeHandler middlewares reducers command state = handleMiddlewares command middlewares
+        where
+          handleMiddlewares :: SomeCommand state -> [SomeMiddleware state] -> IO state
+          handleMiddlewares command (m:ms) = m (flip handleMiddlewares ms) command state
+          handleMiddlewares command []     = return (reduce command state reducers)
 
-        reduce = foldr . flip id
+          reduce = foldr . flip id
 
-createStore :: (MonadIO c, Typeable state) => state -> [SomeReducer state] -> [SomeMiddleware state] -> c ()
-createStore state reducers middlewares = void $ with (store state reducers middlewares) (return ())
-
-applyReducers :: forall c state. (MonadIO c, Typeable state) => [SomeReducer state] -> c (Promise ())
-applyReducers reducers = with (store (error "applyReducers: store not initialized" :: state) [] []) $ do
-    ExcelsiorState {..} <- get
-    let handler = composeHandler esCurrentMiddlewares reducers
-    put ExcelsiorState { esCurrentReducers = reducers, esCurrentHandler = handler, .. }
-
-applyMiddlewares :: forall c state. (MonadIO c, Typeable state) => [SomeMiddleware state] -> c (Promise ())
-applyMiddlewares middlewares = with (store (error "applyMiddlewares: store not initialized" :: state) [] []) $ do
-    ExcelsiorState {..} <- get
-    let handler = composeHandler middlewares esCurrentReducers
-    put ExcelsiorState { esCurrentMiddlewares = middlewares, esCurrentHandler = handler, .. }
-
-{-# INLINE watchIO_ #-}
-watchIO_ :: forall c state. (Typeable state, MonadIO c)
-         => Bool -> (state -> IO ()) -> c (Promise (IO ()))
-watchIO_ immediate f = with (store (error "watchIO_: store not initialized" :: state) [] []) $ do
-    u <- fresh
-    ExcelsiorState {..} <- get
-
-    -- this is an anti-pattern but we need to be able to remove the callback,
-    -- so we can't store a continuation (state -> IO ()). We also don't want to
-    -- have to call reverse on the callbacks every time we send a command. This
-    -- shouldn't be a performance issue, especially compared to observe overhead.
-    let ioCallbacks = esIOCallbacks ++ [(u,f)]
-
-    put ExcelsiorState { esIOCallbacks = ioCallbacks, .. }
-
-    when immediate $ do
-      state <- getO
-      liftIO (f state)
-
-    let remove = void $ with (store (error "watchIO.remove: store has been terminated" :: state) [] []) $ do
-                   ExcelsiorState {..} :: ExcelsiorState state <- get
-                   let ioCallbacks = filter ((/=) u . fst) esIOCallbacks
-                   put ExcelsiorState { esIOCallbacks = ioCallbacks, .. }
-
-    return remove
-
-{-# INLINE commands #-}
--- This method is a bit clunky. Not considering it first-class, for now.
-commands :: forall c state. (Typeable state, MonadIO c) => [SomeCommand state] -> c ()
-commands commands = void $ with (store (error "commands: store not initialized" :: state) [] []) $ do
-    state <- getO
-    ExcelsiorState {..} <- get
-    state' <- liftIO $ foldM (flip esCurrentHandler) state commands
-
-    -- phase 1: notify observers
-    setO state'
-
-    -- phase 2: call IO callbacks
-    liftIO $ mapM_ (($ state') . snd) esIOCallbacks
-
-{-# INLINE getStore #-}
-getStore :: forall c state. (Typeable state, MonadIO c) => c (Promise state)
-getStore = with (store (error "getStore: store not initialized" :: state) [] []) getO
+      callCallbacks :: ExcelsiorState state -> IO ()
+      callCallbacks es_ = do
+        es <- takeMVar es_
+        cbs <- for (esCallbacks es) $ \cb_ -> do
+          cb <- readIORef cb_
+          eeu <- try (cb (esState es))
+          case eeu of
+            Left (_ :: SomeException) -> return Nothing
+            Right _                   -> return (Just cb_)
+        putMVar es_ es { esCallbacks = catMaybes cbs }
 
 {-# INLINE reducer #-}
 reducer :: (Command state cmd) => Reducer state cmd -> SomeReducer state
@@ -165,7 +133,6 @@ reducer f (fromCommand -> Just a) state = f a state
 reducer _ _ state = state
 
 {-# INLINE middleware #-}
--- See Rank2 NOTE
 middleware :: forall state cmd. (Command state cmd) => Middleware state cmd -> SomeMiddleware state
 middleware m next (fromCommand -> Just a) state =
   let
@@ -176,42 +143,34 @@ middleware m next (fromCommand -> Just a) state =
 middleware _ next command _ = next command
 
 {-# INLINE command #-}
-command :: forall c state cmd. (Typeable state, MonadIO c, Command state cmd) => cmd -> c ()
-command (toCommand -> sc) = void $ with (store (error "command: store not initialized" :: state) [] []) $ do
-    state <- getO
-    ExcelsiorState {..} <- get
-    state' <- liftIO $ esCurrentHandler sc state
-
-    -- phase 1: notify observers
-    setO state'
-
-    -- phase 2: call IO callbacks
-    liftIO $ mapM_ (($ state') . snd) esIOCallbacks
-
-{-# INLINE watchIO #-}
-watchIO :: forall c state. (Typeable state, MonadIO c)
-        => (state -> IO ()) -> c (Promise (IO ()))
-watchIO = watchIO_ False
-
-{-# INLINE watchIO' #-}
-watchIO' :: forall c state. (Typeable state, MonadIO c)
-         => (state -> IO ()) -> c (Promise (IO ()))
-watchIO' = watchIO_ True
+command :: forall state cmd. (Typeable state, Command state cmd) => cmd -> IO ()
+command (toCommand -> sc) = lookupStore >>= traverse_ runCommand
+  where
+    runCommand es_ = do
+      es <- takeMVar es_
+      state' <- esHandler es sc (esState es)
+      -- callbacks that throw exceptions are unceremoniously discarded
+      cbs <- for (esCallbacks es) $ \cb_ -> do
+        cb <- readIORef cb_
+        eeu <- try (cb state')
+        case eeu of
+          Left (_ :: SomeException) -> return Nothing
+          Right _                   -> return (Just cb_)
+      putMVar es_ es { esState = state', esCallbacks = catMaybes cbs }
 
 {-# INLINE watch #-}
-watch :: forall c ms state. (Typeable state, MonadIO c, ms <: '[Evented])
-      => (state -> Ef '[Event state] (Ef ms c) ()) -> Ef ms c (Promise (IO ()))
-watch = observe (store (error "watch: store not initialized" :: state) [] [])
+watch :: forall state. (Typeable state) => (state -> IO ()) -> IO (Maybe (Callback state))
+watch f = lookupStore >>= addStoreCallback
+  where
+    addStoreCallback Nothing = return Nothing
+    addStoreCallback (Just es_) = modifyMVar es_ $ \es -> do
+      f_ <- newIORef f
+      let cb = Callback f_
+      return (es { esCallbacks = f_ : esCallbacks es },Just cb)
 
-{-# INLINE watch' #-}
-watch' :: forall c ms state. (Typeable state, MonadIO c, ms <: '[Evented])
-       => (state -> Ef ms c ()) -> Ef ms c (Promise (IO ()))
-watch' = observe' (store (error "watch': store not initialized" :: state) [] [])
-
-{-# INLINE excel #-}
-excel :: (MVC model ms, Typeable state) => (state -> model ms -> model ms) -> Ef ms IO ()
-excel f = void $ watch $ lift . modifyModel . f
-
-{-# INLINE excel' #-}
-excel' :: (MVC model ms, Typeable state) => (state -> model ms -> model ms) -> Ef ms IO ()
-excel' f = void $ watch' $ modifyModel . f
+{-# INLINE unwatch #-}
+unwatch :: forall state. (Typeable state) => Callback state -> IO ()
+unwatch (Callback cb) = lookupStore >>= traverse_ removeStoreCallback
+  where
+    removeStoreCallback = flip modifyMVar_ $ \es ->
+      return es { esCallbacks = filter (/= cb) (esCallbacks es) }

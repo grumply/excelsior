@@ -1,8 +1,8 @@
 name:              excelsior
-version:           0.1.0
+version:           0.7.0.0
 synopsis:          
 homepage:          
-author:            S. M. Hickman
+author:            Sean Mackenzie
 maintainer:        sean@grump.ly
 license:           BSD3
 license-file:      LICENSE
@@ -15,32 +15,9 @@ library
 
   build-depends:
       base >=4.8
-    , tlc
-    , ef-base
-    , ef
-    , pure
-    -- END DEPENDENCIES
-
-  default-extensions:
-    BangPatterns
-    DataKinds
-    DeriveAnyClass
-    DeriveGeneric
-    FlexibleContexts
-    FlexibleInstances
-    ImplicitParams
-    RecordWildCards
-    TypeFamilies
-    TypeOperators
-    ViewPatterns
-    OverloadedStrings
-    MultiParamTypeClasses
-    PackageImports
-    CPP
-    PolyKinds
-    NoMonomorphismRestriction
-    PatternSynonyms
-    -- END EXTENSIONS
+    , pure-core >= 0.7 && < 1
+    , pure-default >= 0.7 && < 1
+    , unordered-containers
 
   exposed-modules:
     Excelsior
