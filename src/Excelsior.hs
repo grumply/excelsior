@@ -1,7 +1,7 @@
 {-# LANGUAGE ExistentialQuantification, RankNTypes, ScopedTypeVariables, FunctionalDependencies, ViewPatterns, RecordWildCards, FlexibleInstances #-}
 module Excelsior
   ( SomeCommand, Command(..), Reducer, Middleware, Callback, Excelsior(..)
-  , reducer, middleware, command, watch, unwatch
+  , reducer, middleware, command, watch, watch', unwatch, current
   ) where
 
 -- from pure-core
@@ -167,6 +167,24 @@ watch f = lookupStore >>= addStoreCallback
       f_ <- newIORef f
       let cb = Callback f_
       return (es { esCallbacks = f_ : esCallbacks es },Just cb)
+
+{-# INLINE watch' #-}
+watch' :: forall state. (Typeable state) => (state -> IO ()) -> IO (Maybe (Callback state))
+watch' f = lookupStore >>= callAndAddStoreCallback
+  where
+    callAndAddStoreCallback Nothing = return Nothing
+    callAndAddStoreCallback (Just es_) = modifyMVar es_ $ \es -> do
+      f (esState es)
+      f_ <- newIORef f
+      let cb = Callback f_
+      return (es { esCallbacks = f_ : esCallbacks es },Just cb)
+
+{-# INLINE current #-}
+current :: forall state. (Typeable state) => IO (Maybe state)
+current = lookupStore >>= viewState
+  where
+    viewState Nothing = return Nothing
+    viewState (Just es_) = (Just . esState) <$> readMVar es_
 
 {-# INLINE unwatch #-}
 unwatch :: forall state. (Typeable state) => Callback state -> IO ()
