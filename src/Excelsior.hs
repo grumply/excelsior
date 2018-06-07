@@ -5,8 +5,8 @@ module Excelsior
   , command, commandNS
   , watch, watchNS
   , watch', watchNS'
-  , unwatch, unwatchNS
-  , current, currentNS
+  , currentState
+  , lookupState, lookupStateNS
   ) where
 
 -- from pure-core
@@ -26,6 +26,7 @@ import Data.Traversable (for,traverse)
 import Data.Typeable
 import GHC.Exts
 import System.IO.Unsafe
+import System.Mem.Weak
 import Unsafe.Coerce
 
 -- from unordered-containers
@@ -62,8 +63,14 @@ lookupStoreNS ns = do
 data SomeCommand state = forall e. Command state e => SomeCommand e
 
 data Callback state = Callback
-  { ecCallback :: IORef (state -> IO ())
-  } deriving Eq
+  { ecNamespace :: Maybe String
+  , ecStateRef :: IORef state
+  , ecCallback :: IORef (state -> IO ())
+  , ecWeakKey  :: Weak ThreadId
+  }
+
+instance Eq (Callback state) where
+  (==) c1 c2 = ecCallback c1 == ecCallback c2
 
 class Typeable c => Command state c | c -> state where
     toCommand :: c -> SomeCommand state
@@ -89,9 +96,9 @@ type SomeMiddleware state = (SomeCommand state -> IO state) -> SomeCommand state
 type Handler state = SomeCommand state -> state -> IO state
 
 data ExcelsiorState_ state = ExcelsiorState
-  { esState     :: state
+  { esState     :: IORef state
   , esHandler   :: Handler state
-  , esCallbacks :: [IORef (state -> IO ())]
+  , esCallbacks :: [(Weak ThreadId,IORef (state -> IO ()))]
   }
 
 type ExcelsiorState state = MVar (ExcelsiorState_ state)
@@ -114,8 +121,9 @@ instance Typeable state => Pure (Excelsior state) where
     ComponentIO $ \self -> def
       { construct = do
           e <- getProps self
+          ess <- newIORef (initial e)
           newMVar ExcelsiorState
-            { esState = initial e
+            { esState = ess
             , esHandler = composeHandler (middlewares e) (reducers e)
             , esCallbacks = []
             }
@@ -126,22 +134,22 @@ instance Typeable state => Pure (Excelsior state) where
             _ -> addStore store >> return store
       , receive = \newprops oldstate -> do
           oldprops <- getProps self
-          let update = modifyMVar_ oldstate $ \es -> return es
-                        { esState = initial newprops
-                        , esHandler = composeHandler (middlewares newprops) (reducers newprops)
-                        }
+          let update = modifyMVar_ oldstate $ \es -> do
+                         modifyIORef (esState es) (const (initial newprops))
+                         return es { esHandler = composeHandler (middlewares newprops) (reducers newprops) }
           case oldprops of
             ExcelsiorNS {} ->
               case newprops of
                 ExcelsiorNS {}
                   | namespace oldprops == namespace newprops -> do
                       update
-                      callCallbacks oldstate
+                      runCallbacks oldstate
                       return oldstate
                   | otherwise -> do
                       removeStoreNS (namespace oldprops) oldstate
+                      ess <- newIORef (initial newprops)
                       newstate <- newMVar ExcelsiorState
-                        { esState = initial newprops
+                        { esState = ess
                         , esHandler = composeHandler (middlewares newprops) (reducers newprops)
                         , esCallbacks = []
                         }
@@ -149,8 +157,9 @@ instance Typeable state => Pure (Excelsior state) where
                       return newstate
                 _ -> do
                       removeStoreNS (namespace oldprops) oldstate
+                      ess <- newIORef (initial newprops)
                       newstate <- newMVar ExcelsiorState
-                        { esState = initial newprops
+                        { esState = ess
                         , esHandler = composeHandler (middlewares newprops) (reducers newprops)
                         , esCallbacks = []
                         }
@@ -158,7 +167,7 @@ instance Typeable state => Pure (Excelsior state) where
                       return newstate
             _ -> do
               update
-              callCallbacks oldstate
+              runCallbacks oldstate
               return oldstate
       , unmount = do
           props <- getProps self
@@ -176,16 +185,22 @@ instance Typeable state => Pure (Excelsior state) where
 
           reduce = foldr . flip id
 
-      callCallbacks :: ExcelsiorState state -> IO ()
-      callCallbacks es_ = do
-        es <- takeMVar es_
-        cbs <- for (esCallbacks es) $ \cb_ -> do
-          cb <- readIORef cb_
-          eeu <- try (cb (esState es))
+{-# INLINE runCallbacks #-}
+runCallbacks :: ExcelsiorState state -> IO ()
+runCallbacks es_ = do
+    es  <- takeMVar es_
+    st  <- readIORef (esState es)
+    cbs <- for (esCallbacks es) $ \(tid_,f_) -> do
+      mtid <- deRefWeak tid_
+      case mtid of
+        Nothing -> return Nothing
+        Just _ -> do
+          f <- readIORef f_
+          eeu <- try (f st)
           case eeu of
             Left (_ :: SomeException) -> return Nothing
-            Right _                   -> return (Just cb_)
-        putMVar es_ es { esCallbacks = catMaybes cbs }
+            Right _                   -> return (Just (tid_,f_))
+    putMVar es_ es { esCallbacks = catMaybes cbs }
 
 {-# INLINE reducer #-}
 reducer :: (Command state cmd) => Reducer state cmd -> SomeReducer state
@@ -204,102 +219,92 @@ middleware _ next command _ = next command
 
 {-# INLINE command #-}
 command :: forall state cmd. (Typeable state, Command state cmd) => cmd -> IO ()
-command (toCommand -> sc) = lookupStore >>= traverse_ runCommand
-  where
-    runCommand es_ = do
-      es <- takeMVar es_
-      state' <- esHandler es sc (esState es)
-      -- callbacks that throw exceptions are unceremoniously discarded
-      cbs <- for (esCallbacks es) $ \cb_ -> do
-        cb <- readIORef cb_
-        eeu <- try (cb state')
-        case eeu of
-          Left (_ :: SomeException) -> return Nothing
-          Right _                   -> return (Just cb_)
-      putMVar es_ es { esState = state', esCallbacks = catMaybes cbs }
+command (toCommand -> sc) = lookupStore >>= traverse_ (\es_ -> runCommand sc es_ >> runCallbacks es_)
 
 {-# INLINE commandNS #-}
 commandNS :: forall state cmd. (Typeable state, Command state cmd) => String -> cmd -> IO ()
-commandNS ns (toCommand -> sc) = lookupStoreNS ns >>= traverse_ runCommand
-  where
-    runCommand es_ = do
-      es <- takeMVar es_
-      state' <- esHandler es sc (esState es)
-      -- callbacks that throw exceptions are unceremoniously discarded
-      cbs <- for (esCallbacks es) $ \cb_ -> do
-        cb <- readIORef cb_
-        eeu <- try (cb state')
-        case eeu of
-          Left (_ :: SomeException) -> return Nothing
-          Right _                   -> return (Just cb_)
-      putMVar es_ es { esState = state', esCallbacks = catMaybes cbs }
+commandNS ns (toCommand -> sc) = lookupStoreNS ns >>= traverse_ (\es_ -> runCommand sc es_ >> runCallbacks es_)
+
+{-# INLINE runCommand #-}
+runCommand :: SomeCommand state -> ExcelsiorState state -> IO ()
+runCommand sc es_ = withMVar es_ $ \es -> do
+  st <- readIORef (esState es)
+  st' <- esHandler es sc st
+  writeIORef (esState es) st'
 
 {-# INLINE watch #-}
-watch :: forall state. (Typeable state) => (state -> IO ()) -> IO (Maybe (Callback state))
+watch :: (Typeable state) => (state -> IO ()) -> IO (Maybe (Callback state))
 watch f = lookupStore >>= addStoreCallback
   where
     addStoreCallback Nothing = return Nothing
     addStoreCallback (Just es_) = modifyMVar es_ $ \es -> do
+      tid_ <- mkWeakThreadId =<< myThreadId
       f_ <- newIORef f
-      let cb = Callback f_
-      return (es { esCallbacks = f_ : esCallbacks es },Just cb)
+      return (es { esCallbacks = (tid_,f_) : esCallbacks es },Just (Callback Nothing (esState es) f_ tid_))
 
 {-# INLINE watchNS #-}
-watchNS :: forall state. (Typeable state) => String -> (state -> IO ()) -> IO (Maybe (Callback state))
+watchNS :: (Typeable state) => String -> (state -> IO ()) -> IO (Maybe (Callback state))
 watchNS ns f = lookupStoreNS ns >>= addStoreCallback
   where
     addStoreCallback Nothing = return Nothing
     addStoreCallback (Just es_) = modifyMVar es_ $ \es -> do
+      tid_ <- mkWeakThreadId =<< myThreadId
       f_ <- newIORef f
-      let cb = Callback f_
-      return (es { esCallbacks = f_ : esCallbacks es },Just cb)
+      return (es { esCallbacks = (tid_,f_) : esCallbacks es },Just (Callback (Just ns) (esState es) f_ tid_))
 
 {-# INLINE watch' #-}
-watch' :: forall state. (Typeable state) => (state -> IO ()) -> IO (Maybe (Callback state))
+watch' :: (Typeable state) => (state -> IO ()) -> IO (Maybe (Callback state))
 watch' f = lookupStore >>= callAndAddStoreCallback
   where
     callAndAddStoreCallback Nothing = return Nothing
     callAndAddStoreCallback (Just es_) = modifyMVar es_ $ \es -> do
-      f (esState es)
+      s <- readIORef (esState es)
+      f s
+      tid_ <- mkWeakThreadId =<< myThreadId
       f_ <- newIORef f
-      let cb = Callback f_
-      return (es { esCallbacks = f_ : esCallbacks es },Just cb)
+      return (es { esCallbacks = (tid_,f_) : esCallbacks es },Just (Callback Nothing (esState es) f_ tid_))
 
 {-# INLINE watchNS' #-}
-watchNS' :: forall state. (Typeable state) => String -> (state -> IO ()) -> IO (Maybe (Callback state))
+watchNS' :: (Typeable state) => String -> (state -> IO ()) -> IO (Maybe (Callback state))
 watchNS' ns f = lookupStoreNS ns >>= callAndAddStoreCallback
   where
     callAndAddStoreCallback Nothing = return Nothing
     callAndAddStoreCallback (Just es_) = modifyMVar es_ $ \es -> do
-      f (esState es)
+      s <- readIORef (esState es)
+      f s
+      tid_ <- mkWeakThreadId =<< myThreadId
       f_ <- newIORef f
-      let cb = Callback f_
-      return (es { esCallbacks = f_ : esCallbacks es },Just cb)
+      return (es { esCallbacks = (tid_,f_) : esCallbacks es },Just (Callback (Just ns) (esState es) f_ tid_))
 
-{-# INLINE current #-}
-current :: forall state. (Typeable state) => IO (Maybe state)
-current = lookupStore >>= viewState
+{-# INLINE currentState #-}
+currentState :: Callback state -> IO state
+currentState (Callback _ st_ _ _) = readIORef st_
+
+{-# INLINE lookupState #-}
+lookupState :: forall state. (Typeable state) => IO (Maybe state)
+lookupState = lookupStore >>= viewState
   where
     viewState Nothing = return Nothing
-    viewState (Just es_) = (Just . esState) <$> readMVar es_
+    viewState (Just es_) = do
+      es <- readMVar es_
+      Just <$> readIORef (esState es)
 
-{-# INLINE currentNS #-}
-currentNS :: forall state. (Typeable state) => String -> IO (Maybe state)
-currentNS ns = lookupStoreNS ns >>= viewState
+{-# INLINE lookupStateNS #-}
+lookupStateNS :: forall state. (Typeable state) => String -> IO (Maybe state)
+lookupStateNS ns = lookupStoreNS ns >>= viewState
   where
     viewState Nothing = return Nothing
-    viewState (Just es_) = (Just . esState) <$> readMVar es_
+    viewState (Just es_) = do
+      es <- readMVar es_
+      Just <$> readIORef (esState es)
 
 {-# INLINE unwatch #-}
-unwatch :: forall state. (Typeable state) => Callback state -> IO ()
-unwatch (Callback cb) = lookupStore >>= traverse_ removeStoreCallback
-  where
-    removeStoreCallback = flip modifyMVar_ $ \es ->
-      return es { esCallbacks = filter (/= cb) (esCallbacks es) }
-
-{-# INLINE unwatchNS #-}
-unwatchNS :: forall state. (Typeable state) => String -> Callback state -> IO ()
-unwatchNS ns (Callback cb) = lookupStoreNS ns >>= traverse_ removeStoreCallback
-  where
-    removeStoreCallback = flip modifyMVar_ $ \es ->
-      return es { esCallbacks = filter (/= cb) (esCallbacks es) }
+unwatch :: forall state. Typeable state => Callback state -> IO ()
+unwatch (Callback mns _ f0_ _) = do
+  mst :: Maybe (ExcelsiorState state) <-
+    case mns of
+      Just ns -> lookupStoreNS ns
+      Nothing -> lookupStore
+  case mst of
+    Nothing -> return ()
+    Just es_ -> modifyMVar_ es_ $ \es -> return (es { esCallbacks = filter (\(tid_,f_) -> f_ /= f0_) (esCallbacks es) })
