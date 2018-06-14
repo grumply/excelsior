@@ -120,7 +120,7 @@ instance Typeable state => Pure (Excelsior state) where
   view =
     ComponentIO $ \self -> def
       { construct = do
-          e <- getProps self
+          e <- ask self
           ess <- newIORef (initial e)
           newMVar ExcelsiorState
             { esState = ess
@@ -128,12 +128,12 @@ instance Typeable state => Pure (Excelsior state) where
             , esCallbacks = []
             }
       , mount = \store -> do
-          e <- getProps self
+          e <- ask self
           case e of
             ExcelsiorNS {..} -> addStoreNS namespace store >> return store
             _ -> addStore store >> return store
       , receive = \newprops oldstate -> do
-          oldprops <- getProps self
+          oldprops <- ask self
           let update = modifyMVar_ oldstate $ \es -> do
                          modifyIORef (esState es) (const (initial newprops))
                          return es { esHandler = composeHandler (middlewares newprops) (reducers newprops) }
@@ -169,11 +169,11 @@ instance Typeable state => Pure (Excelsior state) where
               update
               runCallbacks oldstate
               return oldstate
-      , unmount = do
-          props <- getProps self
+      , unmounted = do
+          props <- ask self
           case props of
-            ExcelsiorNS {} -> getState self >>= removeStoreNS (namespace props)
-            _              -> getState self >>= removeStore
+            ExcelsiorNS {} -> get self >>= removeStoreNS (namespace props)
+            _              -> get self >>= removeStore
       }
     where
       composeHandler :: forall state. [SomeMiddleware state] -> [SomeReducer state] -> Handler state
