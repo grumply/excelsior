@@ -122,16 +122,15 @@ instance Typeable state => Pure (Excelsior state) where
       { construct = do
           e <- ask self
           ess <- newIORef (initial e)
-          newMVar ExcelsiorState
+          es <- newMVar ExcelsiorState
             { esState = ess
             , esHandler = composeHandler (middlewares e) (reducers e)
             , esCallbacks = []
             }
-      , mount = \store -> do
-          e <- ask self
           case e of
-            ExcelsiorNS {..} -> addStoreNS namespace store >> return store
-            _ -> addStore store >> return store
+            ExcelsiorNS {..} -> addStoreNS namespace es
+            _ -> addStore es
+          return es
       , receive = \newprops oldstate -> do
           oldprops <- ask self
           let update = modifyMVar_ oldstate $ \es -> do
