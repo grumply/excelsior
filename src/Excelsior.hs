@@ -89,7 +89,7 @@ instance Typeable state => Command state (SomeCommand state) where
 
 type Reducer state command = command -> state -> state
 
-type Middleware state command = (forall cmd. Command state cmd => cmd -> IO state) -> command -> state -> IO state
+type Middleware state command = (command -> IO state) -> command -> state -> IO state
 type SomeReducer state = Reducer state (SomeCommand state)
 type SomeMiddleware state = (SomeCommand state -> IO state) -> SomeCommand state -> state -> IO state
 
@@ -122,15 +122,16 @@ instance Typeable state => Pure (Excelsior state) where
       { construct = do
           e <- ask self
           ess <- newIORef (initial e)
-          es <- newMVar ExcelsiorState
+          newMVar ExcelsiorState
             { esState = ess
             , esHandler = composeHandler (middlewares e) (reducers e)
             , esCallbacks = []
             }
+      , mount = \store -> do
+          e <- ask self
           case e of
-            ExcelsiorNS {..} -> addStoreNS namespace es
-            _ -> addStore es
-          return es
+            ExcelsiorNS {..} -> addStoreNS namespace store >> return store
+            _ -> addStore store >> return store
       , receive = \newprops oldstate -> do
           oldprops <- ask self
           let update = modifyMVar_ oldstate $ \es -> do

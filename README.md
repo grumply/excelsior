@@ -11,7 +11,9 @@ module Main where
 import Pure
 import Excelsior
 
-data Counter = Count !Int
+import Control.Monad (void)
+
+data Counter = Counter !Int
 
 data CountCmd = Inc | Dec
 instance Command Counter CountCmd
@@ -28,13 +30,13 @@ data Count = Count
 instance Pure Count where
   view = ComponentIO $ \self -> def
     { construct = return 0
-    , executing = void $ watch' $ \(Counter n) -> modify_ $ \_ _ -> n
+    , executing = void $ watch' $ \(Counter n) -> modify_ self $ \_ _ -> n
     , render = \_ n -> 
         Div <||> 
           [ text n
-          , Button <| OnClick (\_ -> command Inc) [ "Increment" ]
-          , Button <| OnClick (\_ -> command Dec) [ "Decrement" ]
-          , Button <| OnClick (\_ -> command Log) [ "Log Count" ]
+          , Button <| OnClick (\_ -> command Inc) |> [ "Increment" ]
+          , Button <| OnClick (\_ -> command Dec) |> [ "Decrement" ]
+          , Button <| OnClick (\_ -> command Log) |> [ "Log Count" ]
           ]
     }
 
