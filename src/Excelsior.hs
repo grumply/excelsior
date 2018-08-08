@@ -257,24 +257,28 @@ watch' :: (Typeable state) => (state -> IO ()) -> IO (Maybe (Callback state))
 watch' f = lookupStore >>= callAndAddStoreCallback
   where
     callAndAddStoreCallback Nothing = return Nothing
-    callAndAddStoreCallback (Just es_) = modifyMVar es_ $ \es -> do
-      s <- readIORef (esState es)
-      f s
-      tid_ <- mkWeakThreadId =<< myThreadId
-      f_ <- newIORef f
-      return (es { esCallbacks = (tid_,f_) : esCallbacks es },Just (Callback Nothing (esState es) f_ tid_))
+    callAndAddStoreCallback (Just es_) = do
+      (run,cb) <- modifyMVar es_ $ \es -> do
+        s <- readIORef (esState es)
+        tid_ <- mkWeakThreadId =<< myThreadId
+        f_ <- newIORef f
+        return (es { esCallbacks = (tid_,f_) : esCallbacks es },(f s,Just (Callback Nothing (esState es) f_ tid_)))
+      run
+      return cb
 
 {-# INLINE watchNS' #-}
 watchNS' :: (Typeable state) => String -> (state -> IO ()) -> IO (Maybe (Callback state))
 watchNS' ns f = lookupStoreNS ns >>= callAndAddStoreCallback
   where
     callAndAddStoreCallback Nothing = return Nothing
-    callAndAddStoreCallback (Just es_) = modifyMVar es_ $ \es -> do
-      s <- readIORef (esState es)
-      f s
-      tid_ <- mkWeakThreadId =<< myThreadId
-      f_ <- newIORef f
-      return (es { esCallbacks = (tid_,f_) : esCallbacks es },Just (Callback (Just ns) (esState es) f_ tid_))
+    callAndAddStoreCallback (Just es_) = do
+      (run,cb) <- modifyMVar es_ $ \es -> do
+        s <- readIORef (esState es)
+        tid_ <- mkWeakThreadId =<< myThreadId
+        f_ <- newIORef f
+        return (es { esCallbacks = (tid_,f_) : esCallbacks es },(f s,Just (Callback (Just ns) (esState es) f_ tid_)))
+      run
+      return cb
 
 {-# INLINE currentState #-}
 currentState :: Callback state -> IO state
