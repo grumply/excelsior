@@ -7,6 +7,7 @@ module Excelsior
   , watch', watchNS'
   , currentState
   , lookupState, lookupStateNS
+  , unwatch
   ) where
 
 -- from pure-core
