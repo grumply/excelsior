@@ -1,6 +1,6 @@
 {-# LANGUAGE ExistentialQuantification, RankNTypes, ScopedTypeVariables, FunctionalDependencies, ViewPatterns, RecordWildCards, FlexibleInstances #-}
 module Excelsior
-  ( SomeCommand, Command(..), Reducer, Middleware, Callback, Excelsior(..)
+  ( SomeCommand, Command(..), Reducer, Middleware, Callback, Excelsior(..), ExcelsiorState
   , excelsior
   , reducer, middleware
   , runCommand, command, commandNS
