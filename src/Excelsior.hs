@@ -1,18 +1,5 @@
 {-# LANGUAGE ExistentialQuantification, RankNTypes, ScopedTypeVariables, FunctionalDependencies, ViewPatterns, RecordWildCards, FlexibleInstances #-}
-module Excelsior
-  ( SomeCommand, Command(..), Reducer, Middleware, Callback, Excelsior(..), ExcelsiorState
-  , excelsior
-  , reducer, middleware
-  , runCommand, command, commandNS
-  , runCallbacks
-  , composeHandler
-  , watchWith, watch, watchNS
-  , watchWith', watch', watchNS'
-  , currentState
-  , lookupStateWith, lookupState, lookupStateNS
-  , unwatch
-  , watched, unwatched
-  ) where
+module Excelsior where
 
 -- from pure-core
 import Pure.Data.View
