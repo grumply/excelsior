@@ -1,4 +1,4 @@
-{-# LANGUAGE ExistentialQuantification, RankNTypes, ScopedTypeVariables, FunctionalDependencies, ViewPatterns, RecordWildCards, FlexibleInstances #-}
+{-# LANGUAGE ExistentialQuantification, RankNTypes, ScopedTypeVariables, FunctionalDependencies, ViewPatterns, RecordWildCards, FlexibleInstances, PatternSynonyms #-}
 module Excelsior where
 
 -- from pure-core
@@ -83,15 +83,15 @@ instance Typeable state => Command state (SomeCommand state) where
 
 type Reducer state command = command -> state -> state
 
-type Middleware state command = (command -> IO state) -> command -> state -> IO state
+type Middleware state command = (command -> state -> IO state) -> command -> state -> IO state
 type SomeReducer state = Reducer state (SomeCommand state)
-type SomeMiddleware state = (SomeCommand state -> IO state) -> SomeCommand state -> state -> IO state
+type SomeMiddleware state = (SomeCommand state -> state -> IO state) -> SomeCommand state -> state -> IO state
 
 type Handler state = SomeCommand state -> state -> IO state
 
 data ExcelsiorState_ state = ExcelsiorState
   { esState       :: IORef state
-  , esHandler     :: Handler state
+  , esHandler     :: Handler state -- is there a reason to keep this around and not re-build it on each command?
   , esReducers    :: [SomeReducer state]
   , esMiddlewares :: [SomeMiddleware state]
   , esCallbacks   :: [(Weak ThreadId,IORef (state -> IO ()))]
@@ -107,22 +107,34 @@ excelsior st rs ms = do
     { esState = st_
     , esReducers = rs
     , esMiddlewares = ms
-    , esHandler = composeHandler ms rs
+    , esHandler = composeHandler rs ms
     , esCallbacks = []
     }
 
 data Excelsior state
-  = Excelsior
+  = Excelsior_
       { initial     :: state
       , reducers    :: [SomeReducer state]
       , middlewares :: [SomeMiddleware state]
       }
-  | ExcelsiorNS
+  | ExcelsiorNS_
       { namespace   :: String
       , initial     :: state
       , reducers    :: [SomeReducer state]
       , middlewares :: [SomeMiddleware state]
       }
+
+pattern Excelsior :: Typeable state => state -> [SomeReducer state] -> [SomeMiddleware state] -> View
+pattern Excelsior initial reducers middlewares = View (Excelsior_ initial reducers middlewares)
+
+pattern ExcelsiorNS :: Typeable state => String -> state -> [SomeReducer state] -> [SomeMiddleware state] -> View
+pattern ExcelsiorNS namespace initial reducers middlewares = View (ExcelsiorNS_ namespace initial reducers middlewares)
+
+createStore :: Typeable state => state -> [SomeReducer state] -> [SomeMiddleware state] -> View
+createStore = Excelsior
+
+createStoreNS :: Typeable state => String -> state -> [SomeReducer state] -> [SomeMiddleware state] -> View
+createStoreNS = ExcelsiorNS
 
 instance Typeable state => Pure (Excelsior state) where
   view =
@@ -130,21 +142,21 @@ instance Typeable state => Pure (Excelsior state) where
       { construct = do
           e <- ask self
           excelsior (initial e) (reducers e) (middlewares e)
-          
+
       , mount = \store -> do
           e <- ask self
           case e of
-            ExcelsiorNS {..} -> addStoreNS namespace store >> return store
+            ExcelsiorNS_ {..} -> addStoreNS namespace store >> return store
             _ -> addStore store >> return store
       , receive = \newprops oldstate -> do
           oldprops <- ask self
           let update = modifyMVar_ oldstate $ \es -> do
                          modifyIORef (esState es) (const (initial newprops))
-                         return es { esHandler = composeHandler (middlewares newprops) (reducers newprops) }
+                         return es { esHandler = composeHandler (reducers newprops) (middlewares newprops) }
           case oldprops of
-            ExcelsiorNS {} ->
+            ExcelsiorNS_ {} ->
               case newprops of
-                ExcelsiorNS {}
+                ExcelsiorNS_ {}
                   | namespace oldprops == namespace newprops -> do
                       update
                       runCallbacks oldstate
@@ -156,7 +168,7 @@ instance Typeable state => Pure (Excelsior state) where
                         { esState = ess
                         , esReducers = reducers newprops
                         , esMiddlewares = middlewares newprops
-                        , esHandler = composeHandler (middlewares newprops) (reducers newprops)
+                        , esHandler = composeHandler (reducers newprops) (middlewares newprops)
                         , esCallbacks = []
                         }
                       addStoreNS (namespace newprops) newstate
@@ -168,7 +180,7 @@ instance Typeable state => Pure (Excelsior state) where
                         { esState = ess
                         , esReducers = reducers newprops
                         , esMiddlewares = middlewares newprops
-                        , esHandler = composeHandler (middlewares newprops) (reducers newprops)
+                        , esHandler = composeHandler (reducers newprops) (middlewares newprops)
                         , esCallbacks = []
                         }
                       addStore newstate
@@ -180,17 +192,17 @@ instance Typeable state => Pure (Excelsior state) where
       , unmounted = do
           props <- ask self
           case props of
-            ExcelsiorNS {} -> get self >>= removeStoreNS (namespace props)
+            ExcelsiorNS_ {} -> get self >>= removeStoreNS (namespace props)
             _              -> get self >>= removeStore
       }
 
 {-# INLINE composeHandler #-}
-composeHandler :: forall state. [SomeMiddleware state] -> [SomeReducer state] -> Handler state
-composeHandler middlewares reducers command state = handleMiddlewares command middlewares
+composeHandler :: forall state. [SomeReducer state] -> [SomeMiddleware state] -> Handler state
+composeHandler reducers = handleMiddlewares
   where
-    handleMiddlewares :: SomeCommand state -> [SomeMiddleware state] -> IO state
-    handleMiddlewares command (m:ms) = m (flip handleMiddlewares ms) command state
-    handleMiddlewares command []     = return (reduce command state reducers)
+    handleMiddlewares :: [SomeMiddleware state] -> SomeCommand state -> state -> IO state
+    handleMiddlewares (m:ms) command state = m (handleMiddlewares ms) command state
+    handleMiddlewares []     command state = return (reduce command state reducers)
 
     reduce = foldr . flip id
 
@@ -220,11 +232,11 @@ reducer _ _ state = state
 middleware :: forall state cmd. (Command state cmd) => Middleware state cmd -> SomeMiddleware state
 middleware m next (fromCommand -> Just a) state =
   let
-      continue :: forall cmd'. Command state cmd' => cmd' -> IO state
+      continue :: forall cmd'. Command state cmd' => cmd' -> state -> IO state
       continue cmd = next (toCommand cmd)
   in
       m continue a state
-middleware _ next command _ = next command
+middleware _ next command state = next command state
 
 {-# INLINE runCommand #-}
 runCommand :: SomeCommand state -> ExcelsiorState state -> IO ()
@@ -305,12 +317,12 @@ unwatch (Callback _ _ f0_ _ wref_) = do
 
 {-# INLINE watched #-}
 watched :: ExcelsiorState state -> IO Bool
-watched = fmap not . unwatched 
+watched = fmap not . unwatched
 
 {-# INLINE unwatched #-}
 unwatched :: ExcelsiorState state -> IO Bool
 unwatched es_ = do
-  mes <- tryReadMVar es_ 
+  mes <- tryReadMVar es_
   case mes of
     Nothing -> return False -- assume it is watched if it is in use
     Just es -> return $ Prelude.null (esCallbacks es)
