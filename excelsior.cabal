@@ -1,22 +1,25 @@
 name:              excelsior
-version:           0.7.0.0
-synopsis:          
-homepage:          
-author:            Sean Mackenzie
-maintainer:        sean@grump.ly
+version:           0.8.0.0
+homepage:          purehs.org/doc/excelsior
+author:            Sean Hickman
+maintainer:        sean@grumply.com
 license:           BSD3
 license-file:      LICENSE
 cabal-version:     >= 1.10
 build-type:        Simple
+
+source-repository head
+  type: git
+  location: https://github.com/grumply/excelsior.git
 
 library
   hs-source-dirs:
       src
 
   build-depends:
-      base >=4.8
-    , pure-core >= 0.7 && < 1
-    , pure-default >= 0.7 && < 1
+      base
+    , pure-core
+    , pure-default
     , unordered-containers
 
   exposed-modules:
