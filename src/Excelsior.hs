@@ -326,3 +326,15 @@ unwatched es_ = do
   case mes of
     Nothing -> return False -- assume it is watched if it is in use
     Just es -> return $ Prelude.null (esCallbacks es)
+
+{-# INLINE watcher #-}
+-- If no store exists for the `a`, this is equivalent to `\_ -> Null`
+watcher :: Typeable a => (a -> View) -> View
+watcher w = flip Component () $ \self ->
+  def
+    { construct = lookupState
+    , executing = \a -> do
+      watch (\a -> modify_ self $ \_ _ -> a)
+      pure a
+    , render = \_ -> maybe Null w
+    }
