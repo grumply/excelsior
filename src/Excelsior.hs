@@ -138,7 +138,7 @@ createStoreNS = ExcelsiorNS
 
 instance Typeable state => Pure (Excelsior state) where
   view =
-    ComponentIO $ \self -> def
+    Component $ \self -> def
       { construct = do
           e <- ask self
           excelsior (initial e) (reducers e) (middlewares e)
